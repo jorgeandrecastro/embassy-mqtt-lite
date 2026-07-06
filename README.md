@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/embassy-mqtt-lite/badge.svg)](https://docs.rs/embassy-mqtt-lite)
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
 [![no_std](https://img.shields.io/badge/no__std-yes-success.svg)](https://docs.rust-embedded.org/book/intro/no-std.html)
-[![Downloads](https://img.shields.io/crates/d/embassy-mqtt-lite.svg)](https://crates.io/crates/embassy-mqtt-lite)
+
 
 Un client **MQTT v3.1.1** minimal, asynchrone et `no_std`, agnostique du transport.
 
