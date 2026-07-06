@@ -1,0 +1,33 @@
+[package]
+name          = "embassy-mqtt-lite"
+version       = "0.1.0"
+edition       = "2024"
+authors       = ["Jorge Andre Castro <georgeandrec@gmail.com>"]
+license       = "GPL-2.0-or-later"
+description   = "Client MQTT v3.1.1 minimal, async, no_std, agnostique du transport (TCP, TLS, etc.), basé sur embedded-io-async."
+repository    = "https://github.com/jorgeandrecastro/embassy-mqtt-lite"
+documentation = "https://docs.rs/embassy-mqtt-lite"
+readme        = "README.md"
+keywords      = ["mqtt", "embassy", "no-std", "embedded", "async"]
+categories    = ["embedded", "no-std", "network-programming"]
+
+build        = false
+autolib      = false
+autobins     = false
+autoexamples = false
+autotests    = false
+autobenches  = false
+
+[lib]
+name = "embassy_mqtt_lite"
+path = "src/lib.rs"
+
+[dependencies]
+embedded-io-async = "0.7"
+
+[profile.release]
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+strip         = true
