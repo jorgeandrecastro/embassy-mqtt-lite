@@ -13,26 +13,29 @@ Conçu pour les projets embarqués basés sur [Embassy](https://embassy.dev/) (E
 ## ✨ Fonctionnalités
 
 - ✅ Connexion MQTT 3.1.1 (`CONNECT` / `CONNACK`), Clean Session
+- ✅ Authentification username/password
+- ✅ Last Will and Testament
+- ✅ Keep-alive via `PINGREQ`/`PINGRESP`
 - ✅ Publication en **QoS 0** (fire-and-forget)
 - ✅ `no_std`, zéro allocation dynamique (buffers de taille fixe sur la pile)
 - ✅ Agnostique du transport : TCP, TLS, ou tout autre flux `embedded-io-async`
-- ✅ Aucune dépendance lourde une seule dépendance : `embedded-io-async`
+- ✅ Aucune dépendance lourde : une seule dépendance : `embedded-io-async`
 - ✅ Compatible avec n'importe quelle pile réseau Embassy (`embassy-net`, etc.)
 
 ## 🚧 Limitations actuelles
 
 - Seule la **QoS 0** est supportée (pas de QoS 1/2, pas d'accusés applicatifs)
-- Pas de souscription (`SUBSCRIBE`) publication uniquement pour l'instant
-- Pas d'authentification (user/password) ni de TLS intégré (le TLS peut être géré en amont via le transport fourni)
-- Pas de gestion automatique du `PINGREQ`/keep-alive  à gérer côté application si nécessaire
+- Pas de souscription (`SUBSCRIBE`) , publication uniquement pour l'instant
+- Pas de TLS intégré (peut être géré en amont via le transport fourni)
 
 Ces limitations correspondent à un usage simple de reporting/télémétrie. Des contributions pour étendre les fonctionnalités sont bienvenues !
+
 
 ## 📦 Installation
 
 ```toml
 [dependencies]
-embassy-mqtt-lite = "0.1"
+embassy-mqtt-lite = "0.2"
 ```
 
 ## 🚀 Exemple d'utilisation
@@ -65,6 +68,52 @@ async fn publish_example(stack: embassy_net::Stack<'static>) {
 La crate construit les paquets MQTT bruts (`CONNECT`, `PUBLISH`) dans un buffer de taille fixe (`MAX_PACKET_SIZE`, 256 octets par défaut, ajustable dans le code source) puis les envoie via le trait `embedded_io_async::Write` du transport fourni. La réponse `CONNACK` est lue et validée via `embedded_io_async::Read`.
 
 Aucune hypothèse n'est faite sur la pile réseau : que ce soit `embassy-net`, un autre stack TCP/IP, ou même un flux série faisant office de passerelle, tant que le type implémente `Read + Write` de `embedded-io-async`, ça fonctionne.
+
+
+## 🏭 Exemple avec reconnexion et authentification
+
+```rust
+use embassy_mqtt_lite::{MqttClient, ConnectOptions, LastWill};
+use embassy_time::{Duration, Timer};
+
+async fn mqtt_loop(stack: embassy_net::Stack<'static>) {
+    loop {
+        let mut rx_buffer = [0u8; 512];
+        let mut tx_buffer = [0u8; 512];
+        let mut socket = embassy_net::tcp::TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+
+        let remote = (embassy_net::IpAddress::v4(192, 168, 1, 84), 1883);
+        if socket.connect(remote).await.is_err() {
+            Timer::after(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        let mut client = MqttClient::new(&mut socket);
+
+        let options = ConnectOptions {
+            username: Some("mon_user"),
+            password: Some(b"mon_mdp"),
+            last_will: Some(LastWill {
+                topic: "capteurs/salon/status",
+                message: b"offline",
+                retain: true,
+            }),
+        };
+
+        if client.connect_with_options("esp32-salon", 60, &options).await.is_err() {
+            Timer::after(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        loop {
+            if client.publish("capteurs/salon/temperature", b"21.5").await.is_err() {
+                break; // reconnexion
+            }
+            Timer::after(Duration::from_secs(30)).await;
+        }
+    }
+}
+```
 
 ## 🎯 Pourquoi cette crate ?
 
