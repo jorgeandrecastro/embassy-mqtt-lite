@@ -17,6 +17,7 @@ Conçu pour les projets embarqués basés sur [Embassy](https://embassy.dev/) (E
 - ✅ Last Will and Testament
 - ✅ Keep-alive via `PINGREQ`/`PINGRESP`
 - ✅ Publication en **QoS 0** (fire-and-forget)
+- ✅ Souscription (`SUBSCRIBE`/`SUBACK`) et réception de messages (`PUBLISH` entrants)
 - ✅ `no_std`, zéro allocation dynamique (buffers de taille fixe sur la pile)
 - ✅ Agnostique du transport : TCP, TLS, ou tout autre flux `embedded-io-async`
 - ✅ Aucune dépendance lourde : une seule dépendance : `embedded-io-async`
@@ -24,18 +25,17 @@ Conçu pour les projets embarqués basés sur [Embassy](https://embassy.dev/) (E
 
 ## 🚧 Limitations actuelles
 
-- Seule la **QoS 0** est supportée (pas de QoS 1/2, pas d'accusés applicatifs)
-- Pas de souscription (`SUBSCRIBE`) , publication uniquement pour l'instant
+- Seule la **QoS 0** est supportée en réception comme en émission (pas d'accusés applicatifs QoS 1/2)
+- Une seule souscription active par instance de `MqttClient` à la fois (pas de multiplexage interne — utilise une connexion dédiée si tu as besoin de publier et souscrire en parallèle)
 - Pas de TLS intégré (peut être géré en amont via le transport fourni)
 
-Ces limitations correspondent à un usage simple de reporting/télémétrie. Des contributions pour étendre les fonctionnalités sont bienvenues !
-
+Ces limitations correspondent à un usage simple de télémétrie et de commande à distance. Des contributions pour étendre les fonctionnalités sont bienvenues !
 
 ## 📦 Installation
 
 ```toml
 [dependencies]
-embassy-mqtt-lite = "0.2"
+embassy-mqtt-lite = "0.3"
 ```
 
 ## 🚀 Exemple d'utilisation
@@ -114,6 +114,55 @@ async fn mqtt_loop(stack: embassy_net::Stack<'static>) {
     }
 }
 ```
+
+
+## 📡 Exemple : souscription et réception de commandes
+
+```rust
+use embassy_mqtt_lite::MqttClient;
+use embassy_time::{Duration, Timer};
+
+async fn mqtt_subscribe_loop(stack: embassy_net::Stack<'static>) {
+    loop {
+        let mut rx_buffer = [0u8; 512];
+        let mut tx_buffer = [0u8; 512];
+        let mut socket = embassy_net::tcp::TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+
+        let remote = (embassy_net::IpAddress::v4(192, 168, 1, 84), 1883);
+        if socket.connect(remote).await.is_err() {
+            Timer::after(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        let mut client = MqttClient::new(&mut socket);
+
+        // Utilise un client_id différent de ta connexion de publication !
+        if client.connect("esp32-salon-sub", 60).await.is_err() {
+            Timer::after(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        if client.subscribe("maison/salon/commande").await.is_err() {
+            Timer::after(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        let mut recv_buf = [0u8; 256];
+        loop {
+            match client.receive(&mut recv_buf).await {
+                Ok(msg) => {
+                    // Traiter msg.topic / msg.payload ici
+                }
+                Err(_) => break, // reconnexion
+            }
+        }
+
+        Timer::after(Duration::from_secs(5)).await;
+    }
+}
+```
+
+> ⚠️ Une même connexion MQTT (`MqttClient`) ne peut pas à la fois publier et attendre indéfiniment un message entrant sans bloquer l'autre opération. Si tu as besoin des deux en parallèle (ex: publier de la télémétrie tout en écoutant des commandes), utilise deux connexions distinctes avec des `client_id` différents — voir l'exemple ci-dessus combiné à l'exemple de publication plus haut.
 
 ## 🎯 Pourquoi cette crate ?
 

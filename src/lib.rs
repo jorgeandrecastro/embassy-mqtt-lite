@@ -3,9 +3,10 @@
 //! Client MQTT v3.1.1 minimal, asynchrone, `no_std`.
 //!
 //! Supporte la QoS 0 (fire-and-forget), l'authentification username/password,
-//! le Last Will and Testament, et le keep-alive via PINGREQ. Fonctionne avec
-//! n'importe quel transport implémentant `embedded_io_async::Read + Write`
-//! (TCP, TLS, série...).
+//! le Last Will and Testament, le keep-alive via PINGREQ, ainsi que la
+//! souscription (`SUBSCRIBE`) et la réception de messages (`PUBLISH` entrants).
+//! Fonctionne avec n'importe quel transport implémentant
+//! `embedded_io_async::Read + Write` (TCP, TLS, série...).
 
 use embedded_io_async::{Read, Write};
 
@@ -26,6 +27,12 @@ pub enum MqttError<E> {
     ConnectionRefused(u8),
     /// La réponse au PINGREQ n'est pas un PINGRESP valide.
     PingFailed,
+    /// Le SUBACK reçu est invalide ou mal formé.
+    SubackInvalid,
+    /// Le broker a refusé la souscription (code de retour SUBACK = 0x80).
+    SubscribeFailed,
+    /// Paquet entrant inattendu ou mal formé.
+    UnexpectedPacket,
 }
 
 impl<E> From<E> for MqttError<E> {
@@ -96,6 +103,8 @@ fn push_string_field(builder: &mut PacketBuilder, s: &[u8]) -> Result<(), ()> {
 
 
 
+
+
 /// Options de connexion optionnelles : authentification et Last Will.
 #[derive(Default)]
 pub struct ConnectOptions<'a> {
@@ -116,13 +125,79 @@ pub struct LastWill<'a> {
 /// Client MQTT minimal opérant sur un transport `Read + Write` fourni par l'appelant.
 pub struct MqttClient<'a, T: Read + Write> {
     transport: &'a mut T,
+    packet_id: u16,
 }
+
+
+/// Construit un paquet SUBSCRIBE en QoS 0 — fonction pure, sans I/O, testable directement.
+fn build_subscribe_packet(topic: &str, packet_id: u16) -> Result<PacketBuilder, ()> {
+    let mut variable_header = PacketBuilder::new();
+    variable_header.extend(&packet_id.to_be_bytes())?;
+
+    let mut payload = PacketBuilder::new();
+    push_string_field(&mut payload, topic.as_bytes())?;
+    payload.push(0x00)?; // QoS 0 demandé
+
+    let mut packet = PacketBuilder::new();
+    packet.push(0x82)?; // SUBSCRIBE (flags fixes = 0010)
+    encode_remaining_length(variable_header.len + payload.len, &mut packet)?;
+    packet.extend(variable_header.as_slice())?;
+    packet.extend(payload.as_slice())?;
+
+    Ok(packet)
+}
+
+/// Résultat de l'analyse d'un paquet SUBACK.
+#[derive(Debug, PartialEq)]
+enum SubackResult {
+    Accepted,
+    Refused,
+    Invalid,
+}
+
+/// Analyse un SUBACK déjà lu en mémoire — fonction pure, sans I/O.
+fn parse_suback(header_byte: u8, body: &[u8]) -> SubackResult {
+    if header_byte != 0x90 || body.len() < 3 {
+        return SubackResult::Invalid;
+    }
+    if body[2] == 0x80 {
+        return SubackResult::Refused;
+    }
+    SubackResult::Accepted
+}
+
+/// Calcule la longueur du topic et l'offset de début du payload d'un PUBLISH
+/// déjà lu en mémoire — fonction pure, sans I/O.
+fn publish_layout(header_byte: u8, buf: &[u8]) -> Result<(usize, usize), ()> {
+    if buf.len() < 2 {
+        return Err(());
+    }
+    let topic_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    let qos = (header_byte >> 1) & 0x03;
+    let mut payload_start = 2 + topic_len;
+    if qos > 0 {
+        payload_start += 2; // Packet Identifier (QoS 1/2)
+    }
+    if payload_start > buf.len() {
+        return Err(());
+    }
+    Ok((topic_len, payload_start))
+}
+/// Message reçu du broker sur un topic souscrit.
+pub struct IncomingMessage<'buf> {
+    pub topic: &'buf str,
+    pub payload: &'buf [u8],
+}
+
 
 
 impl<'a, T: Read + Write> MqttClient<'a, T> {
     /// Crée un nouveau client autour d'un transport déjà connecté (socket TCP, etc.)
     pub fn new(transport: &'a mut T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            packet_id: 1,
+        }
     }
 
     /// Envoie un paquet CONNECT (Clean Session) et attend le CONNACK.
@@ -267,6 +342,106 @@ impl<'a, T: Read + Write> MqttClient<'a, T> {
         Ok(())
     }
 
+
+    
+
+    ///Helper pour lire une "Remaining Length" depuis le réseau (l'inverse de encode_remaining_length)
+    async fn read_remaining_length(&mut self) -> Result<usize, MqttError<T::Error>> {
+        let mut multiplier: usize = 1;
+        let mut value: usize = 0;
+        loop {
+            let mut byte = [0u8; 1];
+            self.transport
+                .read_exact(&mut byte)
+                .await
+                .map_err(|_| MqttError::UnexpectedPacket)?;
+            value += ((byte[0] & 0x7F) as usize) * multiplier;
+            if byte[0] & 0x80 == 0 {
+                break;
+            }
+            multiplier *= 128;
+            if multiplier > 128 * 128 * 128 {
+                return Err(MqttError::PacketTooLarge);
+            }
+        }
+        Ok(value)
+    }
+
+
+    /// Souscrit à un topic en QoS 0 et attend la confirmation SUBACK.
+    pub async fn subscribe(&mut self, topic: &str) -> Result<(), MqttError<T::Error>> {
+        self.packet_id = self.packet_id.wrapping_add(1).max(1);
+        let packet =
+            build_subscribe_packet(topic, self.packet_id).map_err(|_| MqttError::PacketTooLarge)?;
+
+        self.transport.write_all(packet.as_slice()).await?;
+
+        let mut header = [0u8; 1];
+        self.transport
+            .read_exact(&mut header)
+            .await
+            .map_err(|_| MqttError::SubackInvalid)?;
+
+        let remaining_len = self.read_remaining_length().await?;
+        if !(3..=8).contains(&remaining_len) {
+            return Err(MqttError::SubackInvalid);
+        }
+
+        let mut body = [0u8; 8];
+        self.transport
+            .read_exact(&mut body[..remaining_len])
+            .await
+            .map_err(|_| MqttError::SubackInvalid)?;
+
+        match parse_suback(header[0], &body[..remaining_len]) {
+            SubackResult::Accepted => Ok(()),
+            SubackResult::Refused => Err(MqttError::SubscribeFailed),
+            SubackResult::Invalid => Err(MqttError::SubackInvalid),
+        }
+    }
+
+    /// Attend et retourne le prochain message PUBLISH reçu du broker.
+    pub async fn receive<'buf>(
+        &mut self,
+        buf: &'buf mut [u8],
+    ) -> Result<IncomingMessage<'buf>, MqttError<T::Error>> {
+        loop {
+            let mut header = [0u8; 1];
+            self.transport
+                .read_exact(&mut header)
+                .await
+                .map_err(|_| MqttError::UnexpectedPacket)?;
+            let packet_type = header[0] & 0xF0;
+            let remaining_len = self.read_remaining_length().await?;
+
+            if remaining_len > buf.len() {
+                return Err(MqttError::PacketTooLarge);
+            }
+
+            self.transport
+                .read_exact(&mut buf[..remaining_len])
+                .await
+                .map_err(|_| MqttError::UnexpectedPacket)?;
+
+            if packet_type != 0x30 {
+                continue; // Pas un PUBLISH (ex: PINGRESP) : paquet suivant
+            }
+
+            let (topic_len, payload_start) = publish_layout(header[0], &buf[..remaining_len])
+                .map_err(|_| MqttError::UnexpectedPacket)?;
+
+            let (topic_and_rest, payload_part) = buf[..remaining_len].split_at(payload_start);
+            let topic_bytes = &topic_and_rest[2..2 + topic_len];
+            let topic =
+                core::str::from_utf8(topic_bytes).map_err(|_| MqttError::UnexpectedPacket)?;
+
+            return Ok(IncomingMessage {
+                topic,
+                payload: payload_part,
+            });
+        }
+    }
+
     
 }
 
@@ -315,4 +490,70 @@ mod tests {
         let big = [0u8; MAX_PACKET_SIZE + 1];
         assert!(b.extend(&big).is_err());
     }
+
+
+    #[test]
+    fn subscribe_packet_encoding() {
+        let packet = build_subscribe_packet("home/clim", 1).unwrap();
+        let expected = [
+            0x82, 0x0E, // SUBSCRIBE, remaining length = 14
+            0x00, 0x01, // Packet Identifier = 1
+            0x00, 0x09, b'h', b'o', b'm', b'e', b'/', b'c', b'l', b'i', b'm', // Topic Filter
+            0x00, // QoS demandé = 0
+        ];
+        assert_eq!(packet.as_slice(), &expected);
+    }
+
+    #[test]
+    fn suback_accepted() {
+        let body = [0x00, 0x01, 0x00]; // packet id + return code 0 (QoS0 accordé)
+        assert_eq!(parse_suback(0x90, &body), SubackResult::Accepted);
+    }
+
+    #[test]
+    fn suback_refused() {
+        let body = [0x00, 0x01, 0x80];
+        assert_eq!(parse_suback(0x90, &body), SubackResult::Refused);
+    }
+
+    #[test]
+    fn suback_wrong_header_type() {
+        let body = [0x00, 0x01, 0x00];
+        assert_eq!(parse_suback(0x20, &body), SubackResult::Invalid); // pas un SUBACK
+    }
+
+    #[test]
+    fn suback_body_too_short() {
+        let body = [0x00, 0x01];
+        assert_eq!(parse_suback(0x90, &body), SubackResult::Invalid);
+    }
+
+    #[test]
+    fn publish_layout_qos0() {
+        let buf = [0x00, 0x03, b'a', b'/', b'b', b'h', b'i'];
+        let (topic_len, payload_start) = publish_layout(0x30, &buf).unwrap();
+        assert_eq!(topic_len, 3);
+        assert_eq!(payload_start, 5);
+        assert_eq!(&buf[payload_start..], b"hi");
+    }
+
+    #[test]
+    fn publish_layout_qos1_skips_packet_identifier() {
+        let buf = [0x00, 0x03, b'a', b'/', b'b', 0x00, 0x2A, b'h', b'i'];
+        let (topic_len, payload_start) = publish_layout(0x32, &buf).unwrap();
+        assert_eq!(topic_len, 3);
+        assert_eq!(payload_start, 7);
+        assert_eq!(&buf[payload_start..], b"hi");
+    }
+
+    #[test]
+    fn publish_layout_rejects_truncated_buffer() {
+        let buf = [0x00, 0x05, b'a', b'b']; // annonce topic_len=5 mais buffer trop court
+        assert!(publish_layout(0x30, &buf).is_err());
+    }
+
+
+
+
+
 }

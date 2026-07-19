@@ -1,10 +1,10 @@
 [package]
 name          = "embassy-mqtt-lite"
-version       = "0.2.0"
+version       = "0.3.0"
 edition       = "2024"
 authors       = ["Jorge Andre Castro <georgeandrec@gmail.com>"]
 license       = "GPL-2.0-or-later"
-description   = """Client MQTT v3.1.1 minimal, asynchrone, no_std. Supporte la QoS 0 (fire-and-forget), l'authentification username/password, le Last Will and Testament, et le keep-alive via PINGREQ. Fonctionne avec n'importe quel transport implémentant embedded_io_async::Read + Write tcp tls série...."""
+description   = """Client MQTT v3.1.1 minimal, asynchrone, no_std. Supporte la QoS 0 (fire-and-forget), l'authentification username/password, le Last Will and Testament, et le keep-alive via PINGREQ, souscription (`SUBSCRIBE`) et la réception de messages (`PUBLISH` entrants). Fonctionne avec n'importe quel transport implémentant embedded_io_async::Read + Write tcp tls série...."""
 repository    = "https://github.com/jorgeandrecastro/embassy-mqtt-lite"
 documentation = "https://docs.rs/embassy-mqtt-lite"
 readme        = "README.md"
